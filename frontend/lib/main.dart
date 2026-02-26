@@ -1,122 +1,298 @@
-import 'package:flutter/material.dart';
+import 'dart:convert';
 
-void main() {
-  runApp(const MyApp());
+import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart'; // For .env
+import 'package:flutter_tts/flutter_tts.dart'; // For Mouth
+import 'package:http/http.dart' as http;
+import 'package:permission_handler/permission_handler.dart'; // For Permissions
+import 'package:speech_to_text/speech_to_text.dart' as stt; // For Ears
+
+// --- 1. SETUP MAIN ---
+Future<void> main() async {
+  // Ensure Flutter bindings are initialized before loading .env
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Load the .env file
+  await dotenv.load(fileName: ".env");
+
+  runApp(const NyayaSetuApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class NyayaSetuApp extends StatelessWidget {
+  const NyayaSetuApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'Nyaya-Setu',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.orange),
+        useMaterial3: true,
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: const LegalHomePage(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class LegalHomePage extends StatefulWidget {
+  const LegalHomePage({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<LegalHomePage> createState() => _LegalHomePageState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _LegalHomePageState extends State<LegalHomePage> {
+  // --- STATE VARIABLES ---
+  final TextEditingController _controller = TextEditingController();
+  String _legalAdvice = "";
+  bool _isLoading = false;
+  bool _isListening = false;
 
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
-    });
-  }
+  // --- PLUGINS ---
+  late stt.SpeechToText _speech;
+  late FlutterTts _flutterTts;
+
+  // --- GET URL FROM .ENV ---
+  // If .env fails, it defaults to empty string to prevent crash
+  final String _apiUrl = dotenv.env['API_URL'] ?? '';
 
   @override
+  void initState() {
+    super.initState();
+    _speech = stt.SpeechToText();
+    _flutterTts = FlutterTts();
+    _initTts();
+  }
+
+  // Initialize Text-to-Speech settings
+  void _initTts() async {
+    await _flutterTts.setLanguage("hi-IN"); // Hindi India
+    await _flutterTts.setPitch(1.0);
+    await _flutterTts.setSpeechRate(0.5); // Slower speed for clarity
+  }
+
+  // --- VOICE INPUT (EARS) ---
+  Future<void> _listen() async {
+    if (!_isListening) {
+      // Check Permission
+      var status = await Permission.microphone.request();
+      if (status != PermissionStatus.granted) return;
+
+      bool available = await _speech.initialize(
+        onStatus: (val) => print('onStatus: $val'),
+        onError: (val) => print('onError: $val'),
+      );
+
+      if (available) {
+        setState(() => _isListening = true);
+        _speech.listen(
+          onResult: (val) {
+            setState(() {
+              _controller.text = val.recognizedWords;
+            });
+          },
+          localeId: "hi_IN", // Listen for Hindi/English mix
+        );
+      }
+    } else {
+      setState(() => _isListening = false);
+      _speech.stop();
+    }
+  }
+
+  // --- API CALL (BRAIN) ---
+  Future<void> _getAdvice() async {
+    if (_controller.text.isEmpty) return;
+
+    // Safety check for URL
+    if (_apiUrl.isEmpty) {
+      setState(() => _legalAdvice = "Error: API_URL not found in .env file!");
+      return;
+    }
+
+    FocusScope.of(context).unfocus();
+    _speech.stop();
+
+    setState(() {
+      _isLoading = true;
+      _isListening = false;
+      _legalAdvice = "";
+    });
+
+    try {
+      final response = await http.post(
+        Uri.parse(_apiUrl),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({"text": _controller.text}),
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        setState(() {
+          _legalAdvice = data['legal_advice'] ?? "No advice received.";
+        });
+
+        // Auto-speak result (Hybrid Edge-Cloud Strategy)
+        _speakAdvice(_legalAdvice);
+      } else {
+        setState(() => _legalAdvice = "Server Error: ${response.statusCode}");
+      }
+    } catch (e) {
+      setState(() => _legalAdvice = "Connection Error: Check internet.");
+    } finally {
+      setState(() => _isLoading = false);
+    }
+  }
+
+  // --- VOICE OUTPUT (MOUTH) ---
+  Future<void> _speakAdvice(String text) async {
+    await _flutterTts.speak(text);
+  }
+
+  Future<void> _stopSpeaking() async {
+    await _flutterTts.stop();
+  }
+
+  // --- UI BUILD ---
+  @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
       appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
+        title: const Text("Nyaya-Setu 🇮🇳"),
+        backgroundColor: Colors.orange[100],
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.volume_off),
+            onPressed: _stopSpeaking,
+            tooltip: "Stop Speaking",
+          ),
+        ],
       ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
-            ),
-          ],
+      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
+      floatingActionButton: AvatarGlow(
+        animate: _isListening,
+        glowColor: Colors.red,
+        child: FloatingActionButton(
+          onPressed: _listen,
+          backgroundColor: _isListening ? Colors.red : Colors.blue,
+          child: Icon(
+            _isListening ? Icons.mic : Icons.mic_none,
+            size: 30,
+            color: Colors.white,
+          ),
         ),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextField(
+                controller: _controller,
+                maxLines: 4,
+                decoration: const InputDecoration(
+                  labelText: "Speak or Type your problem...",
+                  border: OutlineInputBorder(),
+                  hintText:
+                      "Example: My landlord is refusing to return my deposit...",
+                  suffixIcon: Icon(Icons.edit),
+                ),
+              ),
+              const SizedBox(height: 15),
+              ElevatedButton.icon(
+                onPressed: _isLoading ? null : _getAdvice,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.orange,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 15),
+                ),
+                icon: _isLoading
+                    ? const SizedBox.shrink()
+                    : const Icon(Icons.gavel),
+                label: _isLoading
+                    ? const SizedBox(
+                        height: 20,
+                        width: 20,
+                        child: CircularProgressIndicator(
+                          color: Colors.white,
+                          strokeWidth: 2,
+                        ),
+                      )
+                    : const Text(
+                        "Get Legal Advice",
+                        style: TextStyle(fontSize: 18),
+                      ),
+              ),
+              const SizedBox(height: 20),
+              if (_legalAdvice.isNotEmpty) ...[
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      "AI Legal Advice:",
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.green,
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.volume_up, color: Colors.blue),
+                      onPressed: () => _speakAdvice(_legalAdvice),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.all(15),
+                  decoration: BoxDecoration(
+                    color: Colors.grey[100],
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: Colors.grey[300]!),
+                  ),
+                  child: Text(
+                    _legalAdvice,
+                    style: const TextStyle(fontSize: 16),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// Simple Glow Animation Widget for Mic
+class AvatarGlow extends StatelessWidget {
+  final bool animate;
+  final Color glowColor;
+  final Widget child;
+  const AvatarGlow({
+    super.key,
+    required this.animate,
+    required this.glowColor,
+    required this.child,
+  });
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: animate
+          ? BoxDecoration(
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: glowColor.withOpacity(0.5),
+                  blurRadius: 20,
+                  spreadRadius: 5,
+                ),
+              ],
+            )
+          : null,
+      child: child,
     );
   }
 }
