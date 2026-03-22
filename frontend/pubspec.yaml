@@ -43,9 +43,7 @@ dependencies:
   printing: ^5.13.3
   google_fonts: ^6.2.1
   shared_preferences: ^2.3.5
-  amplify_flutter: ^2.4.0
-  amplify_auth_cognito: ^2.4.0
-  amplify_authenticator: ^2.4.0
+
 
 
 dev_dependencies:
